@@ -38,7 +38,7 @@
 obj=""
 bdir="build"
 
-cflags="-Wall -Wextra -Wpedantic -Isrc"
+cflags="-Wall -Wextra -Wpedantic -Isrc -ansi"
 ldflags="-lm"
 
 for i in $(find src -name "*.c" -type f); do

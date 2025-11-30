@@ -37,5 +37,7 @@
 
 typedef unsigned long int word_t;
 void sha256(word_t h[8], unsigned char *msg, size_t size);
+void sha256_fnc(word_t h[8], unsigned char msg_get_next(void *data),
+                size_t size, void *data);
 
 #endif

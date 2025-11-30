@@ -39,6 +39,8 @@
 #include <unistd.h>
 
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
 #include <hash.h>
 
@@ -48,15 +50,81 @@ static const char help[] = "USAGE: %s [-hp] [-s hostname] [files...]\n"
 "\n"
 "  -s   Set the IP address to send files to.\n"
 "  -p   Show progess.\n"
+"  -y   Accept all.\n"
 "  -h   Show this help.\n";
 
 static int port;
 static char *dest = NULL;
 
 static int receive = 1;
-static int progress = 1;
+static int progress = 0;
+static int acceptall = 0;
 
-static int fd;
+static int socket_fd;
+
+static char *name;
+
+static unsigned char file_next(void *_fd){
+    register int fd = *(int*)_fd;
+    unsigned char c;
+
+    if(read(fd, &c, 1) < 1){
+        fprintf(stderr, "%s: Read error!\n", name);
+        close(fd);
+        exit(EXIT_FAILURE);
+    }
+
+    return c;
+}
+
+static void send_file(char *file) {
+    static word_t hash[8];
+    int fd;
+
+    struct stat statbuf;
+
+    off_t size;
+
+    size_t i;
+
+    fd = open(file, O_RDONLY);
+    if(fd < 0){
+        fprintf(stderr, "%s: Failed to open `%s'...\n", name, file);
+        exit(EXIT_FAILURE);
+    }
+    fstat(fd, &statbuf);
+
+    if(statbuf.st_mode&S_IXUSR){
+        puts("Execute bit set!");
+    }
+
+    /* Get the file size */
+    size = lseek(fd, 0, SEEK_END);
+    if(size < 0){
+        fprintf(stderr, "%s: Failed to seek to the end of `%s'...\n", name,
+                file);
+        close(fd);
+        exit(EXIT_FAILURE);
+    }
+
+    if(lseek(fd, 0, SEEK_SET) < 0){
+        fprintf(stderr, "%s: Failed to seek to the start of `%s'...\n", name,
+                file);
+        close(fd);
+        exit(EXIT_FAILURE);
+    }
+
+    sha256_fnc(hash, file_next, size, &fd);
+
+    printf("File `%s' (%lu bytes) sent successfully!\n"
+           "SHA-256 checksum: ", file, size);
+    for(i=0;i<8;i++){
+        printf("%08lx", hash[i]);
+    }
+    fputc('\n', stdout);
+
+    close(fd);
+}
 
 int main(int argc, char **argv) {
     extern int optind;
@@ -65,20 +133,23 @@ int main(int argc, char **argv) {
 
     size_t i;
 
-    static word_t hash[8];
-    char *msg = "";
+    name = *argv;
 
     if(argc < 2){
         fprintf(stderr, help, *argv);
+        return EXIT_FAILURE;
     }
 
-    while((c = getopt(argc, argv, "hps:")) > 0){
+    while((c = getopt(argc, argv, "hpys:")) > 0){
         switch(c){
             case 'h':
                 printf(help, *argv);
                 break;
             case 'p':
                 progress = 1;
+                break;
+            case 'y':
+                acceptall = 1;
                 break;
             case 's':
                 if(dest != NULL){
@@ -102,24 +173,11 @@ int main(int argc, char **argv) {
     port = atoi(argv[optind++]);
 
     for(;argv[optind];optind++){
-        puts(argv[optind]);
+        if(!receive){
+            printf("Sending `%s'...\n", argv[optind]);
+            send_file(argv[optind]);
+        }
     }
-
-    sha256(hash, (unsigned char*)msg, strlen(msg));
-
-    fputs("0x", stdout);
-    for(i=0;i<8;i++){
-        printf("%08lx", hash[i]);
-    }
-    fputc('\n', stdout);
-
-    sha256(hash, (unsigned char*)msg, strlen(msg));
-
-    fputs("0x", stdout);
-    for(i=0;i<8;i++){
-        printf("%08lx", hash[i]);
-    }
-    fputc('\n', stdout);
 
     return EXIT_SUCCESS;
 }
