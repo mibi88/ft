@@ -46,8 +46,8 @@
 
 /* Macros to add the working variables to the hash. */
 #define LOOP8(l)    l(0);l(1);l(2);l(3);l(4);l(5);l(6);l(7)
-#define _ADD_HASH(i) h[i] = (h[i]+tmp[i])&0xFFFFFFFF
-#define ADD_HASH() LOOP8(_ADD_HASH)
+#define ADD_HASH_SET(i) h[i] = (h[i]+tmp[i])&0xFFFFFFFF
+#define ADD_HASH() LOOP8(ADD_HASH_SET)
 
 /* Functions described in section 2.2.2. */
 #define ROTR(x, n)   ((((x)>>(n))&0xFFFFFFFF)|(((x)<<(32-n))&0xFFFFFFFF))
