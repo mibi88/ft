@@ -497,6 +497,12 @@ void receive_file(void) {
                                            S_IROTH |
                                            (exec_bit ? S_IXUSR | S_IXGRP |
                                                        S_IXOTH : 0));
+    if(fd < 0){
+        fprintf(stderr, "%s: Failed to open `%s'!\n", name, outname);
+        close(socket_fd);
+        close(client_fd);
+        exit(EXIT_FAILURE);
+    }
     fsync(fd);
 
     /* Hash and receive the file */
