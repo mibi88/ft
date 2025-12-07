@@ -49,6 +49,8 @@
 
 #include <hash.h>
 
+#include <signal.h>
+
 #ifdef AF_INET6
 #define DOMAIN (force_ipv6 ? AF_INET6 : (force_ipv4 ? AF_INET : AF_UNSPEC))
 #else
@@ -57,7 +59,10 @@
 
 #define MAGIC "FTv1"
 
-static const char help[] = "USAGE: %s [-hp46] [-s hostname] [files...]\n"
+#define BACKLOG_MAX 128
+
+static const char help[] =
+"USAGE: %s [-hp46] [-s hostname] [port] [files...]\n"
 "\n"
 "ft -- A basic file transfer utility.\n"
 "\n"
@@ -80,6 +85,8 @@ static int force_ipv4 = 0;
 static int socket_fd;
 
 static int fd;
+
+static int client_fd;
 
 static char *name;
 
@@ -107,6 +114,56 @@ static unsigned char file_next(void *_data){
     return c;
 }
 
+typedef int sock_fnc_t(int, const struct sockaddr *, socklen_t);
+
+static void open_socket(sock_fnc_t call, int passive) {
+    struct addrinfo *addr;
+
+    struct addrinfo *current;
+
+    struct addrinfo hints = {
+        0,              /* ai_flags */
+        AF_UNSPEC,      /* ai_family (set later) */
+        SOCK_STREAM,    /* ai_socktype */
+        0,              /* ai_protocol (allow any protocol) */
+        0,              /* ai_addrlen */
+        NULL,           /* ai_addr */
+        NULL,           /* ai_canonname */
+        NULL            /* ai_next */
+    };
+
+    int err;
+
+    hints.ai_family = DOMAIN;
+    if(passive) hints.ai_flags = AI_PASSIVE;
+
+    if((err = getaddrinfo(dest, port, &hints, &addr))){
+        fprintf(stderr, "%s: getaddrinfo failed with error `%s'!\n", name,
+                gai_strerror(err));
+        exit(EXIT_FAILURE);
+    }
+
+    for(current=addr;current!=NULL;current=current->ai_next){
+        socket_fd = socket(current->ai_family, current->ai_socktype,
+                           current->ai_protocol);
+
+        if(socket_fd < 0) continue;
+
+        if(!call(socket_fd, current->ai_addr, current->ai_addrlen)){
+            break;
+        }
+
+        close(socket_fd);
+    }
+
+    freeaddrinfo(addr);
+
+    if(current == NULL){
+        fprintf(stderr, "%s: Failed to connect!\n", name);
+        exit(EXIT_FAILURE);
+    }
+}
+
 #define LOAD_U64_LOOP(l, b, u) l(b, u, 0); \
                                l(b, u, 1); \
                                l(b, u, 2); \
@@ -125,67 +182,63 @@ static unsigned char file_next(void *_data){
 #define LOAD_U32_LOAD(b, u, i) b[i] = (u>>((3-i)*8))&0xFF
 #define LOAD_U32(b, u)         LOAD_U32_LOOP(LOAD_U32_LOAD, (b), (u))
 
-static void send_file(char *file) {
-    static word_t hash[8];
+#define UNLOAD_U32(u, b) u = (((unsigned long int)(b)[0]<<24)| \
+                              ((unsigned long int)(b)[1]<<16)| \
+                              ((unsigned long int)(b)[2]<<8)| \
+                              (unsigned long int)(b)[3])
+#define UNLOAD_U64(u, b) u = (((unsigned long int)(b)[0]<<7*8)| \
+                              ((unsigned long int)(b)[1]<<6*8)| \
+                              ((unsigned long int)(b)[2]<<5*8)| \
+                              ((unsigned long int)(b)[3]<<4*8)| \
+                              ((unsigned long int)(b)[4]<<3*8)| \
+                              ((unsigned long int)(b)[5]<<2*8)| \
+                              ((unsigned long int)(b)[6]<<8)| \
+                              (unsigned long int)(b)[7])
 
+static word_t hash[8];
+
+#define SEND(fd, b, l, f) \
+    { \
+        if(send(fd, b, l, f) != (ssize_t)(l)){ \
+            fprintf(stderr, "%s: Send error!\n", name); \
+            close(socket_fd); \
+            close(fd); \
+            exit(EXIT_FAILURE); \
+        } \
+    }
+
+#define RECV(fd, b, l, f, is_fd_open) \
+    { \
+        if(recv(fd, b, l, f) != (ssize_t)(l)){ \
+            fprintf(stderr, "%s: Receive error!\n", name); \
+            close(socket_fd); \
+            close(client_fd); \
+            if(is_fd_open) close(fd); \
+            exit(EXIT_FAILURE); \
+        } \
+    }
+
+static void send_file(char *file) {
     struct stat statbuf;
 
     off_t size;
 
     size_t i;
 
-    struct addrinfo *addr;
-
-    struct addrinfo *current;
-
-    struct addrinfo hints = {
-        0,              /* ai_flags */
-        AF_UNSPEC,      /* ai_family (set later) */
-        SOCK_STREAM,    /* ai_socktype */
-        0,              /* ai_protocol (allow any protocol) */
-        0,              /* ai_addrlen */
-        NULL,           /* ai_addr */
-        NULL,           /* ai_canonname */
-        NULL            /* ai_next */
-    };
-
-    int err;
-
     unsigned char buffer[4*8+1];
-
-    hints.ai_family = DOMAIN;
-
-    if((err = getaddrinfo(dest, port, &hints, &addr))){
-        fprintf(stderr, "%s: getaddrinfo failed with error `%s'!\n", name,
-                gai_strerror(err));
-        exit(EXIT_FAILURE);
-    }
-
-    for(current=addr;current!=NULL;current=current->ai_next){
-        socket_fd = socket(current->ai_family, current->ai_socktype,
-                           current->ai_protocol);
-
-        if(socket_fd < 0) continue;
-
-        if(!connect(socket_fd, current->ai_addr, current->ai_addrlen)) break;
-
-        close(socket_fd);
-    }
-
-    freeaddrinfo(addr);
-
-    if(current == NULL){
-        fprintf(stderr, "%s: Failed to connect!\n", name);
-        exit(EXIT_FAILURE);
-    }
 
     fd = open(file, O_RDONLY);
     if(fd < 0){
         fprintf(stderr, "%s: Failed to open `%s'!\n", name, file);
-        close(socket_fd);
         exit(EXIT_FAILURE);
     }
     fstat(fd, &statbuf);
+
+    if(!S_ISREG(statbuf.st_mode)){
+        fprintf(stderr, "%s: `%s' is not a regular file...\n", name, file);
+        close(fd);
+        exit(EXIT_FAILURE);
+    }
 
     if(statbuf.st_mode&S_IXUSR){
         puts("Execute bit set!");
@@ -197,7 +250,6 @@ static void send_file(char *file) {
         fprintf(stderr, "%s: Failed to seek to the end of `%s'...\n", name,
                 file);
         close(fd);
-        close(socket_fd);
         exit(EXIT_FAILURE);
     }
 
@@ -205,18 +257,14 @@ static void send_file(char *file) {
         fprintf(stderr, "%s: Failed to seek to the start of `%s'...\n", name,
                 file);
         close(fd);
-        close(socket_fd);
         exit(EXIT_FAILURE);
     }
+
+    open_socket(connect, 0);
 
     /* Send some file metadata. */
 
-    if(send(socket_fd, MAGIC, sizeof(MAGIC), 0) < 1){
-        fprintf(stderr, "%s: Send error!\n", name);
-        close(socket_fd);
-        close(fd);
-        exit(EXIT_FAILURE);
-    }
+    SEND(socket_fd, MAGIC, sizeof(MAGIC), 0);
 
     LOAD_U64(buffer,    statbuf.st_atime);
     LOAD_U64(buffer+8,  statbuf.st_mtime);
@@ -224,22 +272,12 @@ static void send_file(char *file) {
     LOAD_U64(buffer+24, size);
     buffer[4*8] = (statbuf.st_mode&S_IXUSR) != 0;
 
-    if(send(socket_fd, buffer, sizeof(buffer), 0) < 1){
-        fprintf(stderr, "%s: Send error!\n", name);
-        close(socket_fd);
-        close(fd);
-        exit(EXIT_FAILURE);
-    }
+    SEND(socket_fd, buffer, sizeof(buffer), 0);
 
-    if(send(socket_fd, file, strlen(file)+1, 0) < 1){
-        fprintf(stderr, "%s: Send error!\n", name);
-        close(socket_fd);
-        close(fd);
-        exit(EXIT_FAILURE);
-    }
+    SEND(socket_fd, file, strlen(file)+1, 0);
 
     /* Hash and send the file. */
-    sha256_fnc(hash, file_next, size, &fd);
+    sha256_fnc(hash, file_next, size, NULL);
 
     printf("File `%s' (%lu bytes) sent successfully!\n"
            "SHA-256 checksum: ", file, size);
@@ -249,16 +287,226 @@ static void send_file(char *file) {
     }
     fputc('\n', stdout);
 
-    if(send(socket_fd, buffer, 8*4, 0) < 1){
-        fprintf(stderr, "%s: Send error!\n", name);
-        close(socket_fd);
-        close(fd);
-        exit(EXIT_FAILURE);
-    }
+    SEND(socket_fd, buffer, 8*4, 0);
 
     close(fd);
     close(socket_fd);
 }
+
+static char *basename(char *name) {
+    size_t len = strlen(name);
+
+    size_t i;
+
+    if(!len) return name;
+    if(len == 1){
+        return name[0] == '/' ? name+1 : name;
+    }
+
+    for(i=len-1;i ? i-- : i;){
+        if(name[i] == '/') return name+i+1;
+    }
+
+    return name;
+}
+
+static unsigned char receive_next(void *_data){
+    unsigned char c;
+
+    (void)_data;
+
+    /* TODO: Don't receive and write the file byte per byte. */
+
+    if(recv(client_fd, &c, 1, 0) < 1){
+        fprintf(stderr, "%s: Receive error!\n", name);
+        close(socket_fd);
+        close(client_fd);
+        close(fd);
+        exit(EXIT_FAILURE);
+    }
+
+    if(write(fd, &c, 1) < 1){
+        fprintf(stderr, "%s: Write error!\n", name);
+        close(socket_fd);
+        close(client_fd);
+        close(fd);
+        exit(EXIT_FAILURE);
+    }
+
+    return c;
+}
+
+void receive_file(void) {
+    static char filename[FILENAME_MAX];
+    static char *outname;
+    unsigned char buffer[4*8+1];
+    time_t atime;
+    time_t mtime;
+    time_t ctime;
+
+    size_t size;
+
+    unsigned char exec_bit;
+
+    size_t i;
+
+    struct stat statbuf;
+
+    int accept = 0;
+
+    RECV(client_fd, buffer, sizeof(MAGIC), 0, 0);
+
+    if(memcmp((unsigned char*)MAGIC, buffer, 4)){
+        fprintf(stderr, "%s: Invalid magic number!\n", name);
+        close(client_fd);
+        close(socket_fd);
+        exit(EXIT_FAILURE);
+    }
+
+    RECV(client_fd, buffer, 4*8+1, 0, 0);
+    UNLOAD_U64(atime, buffer);
+    UNLOAD_U64(mtime, buffer+8);
+    UNLOAD_U64(ctime, buffer+16);
+    UNLOAD_U64(size, buffer+24);
+    exec_bit = buffer[4*8];
+
+    for(i=0;i<FILENAME_MAX;i++){
+        /* TODO: Do not receive the path one byte at a time. */
+
+        RECV(client_fd, filename+i, 1, 0, 0);
+
+        if(!filename[i]) break;
+    }
+    if(i >= FILENAME_MAX && filename[FILENAME_MAX-1]){
+        fprintf(stderr, "%s: Too long file name!\n", name);
+        close(socket_fd);
+        close(client_fd);
+        exit(EXIT_FAILURE);
+    }
+
+    printf("Receiving %s (%lu bytes)%s...\n"
+           "atime: %ld seconds since UNIX epoch\n"
+           "mtime: %ld seconds since UNIX epoch\n"
+           "ctime: %ld seconds since UNIX epoch\n", filename, size,
+           exec_bit ? " (execute bit set)" : "", atime, mtime, ctime);
+
+    /* FIXME: Check if the file name is valid UTF-8. */
+
+    outname = basename(filename);
+
+    if(!acceptall){
+        char c = '\0';
+        char buffer[3];
+
+        fputs("Skip this file? [Y/n] ", stdout);
+        if(fgets(buffer, 3, stdin) != NULL) c = buffer[0];
+        if(c != 'n' && c != 'N'){
+            puts("Skipping...");
+            return;
+        }
+
+        printf("Save file as `%s'? [y/N] ", outname);
+        if(fgets(buffer, 3, stdin) != NULL) c = buffer[0];
+        if(c == 'y' || c == 'Y'){
+            accept = 1;
+        }
+    }
+
+    if(acceptall || accept){
+        printf("Saving file to `%s'...\n", outname);
+
+        if(!stat((const char*)outname, &statbuf)){
+            if(acceptall){
+                fprintf(stderr, "%s: File already exists!\n", name);
+                close(socket_fd);
+                close(client_fd);
+                exit(EXIT_FAILURE);
+            }else{
+                fputs("File already exists!\n", stderr);
+                accept = 0;
+            }
+        }
+    }
+    if(!acceptall && !accept){
+        do{
+            char *ptr;
+
+            fputs("Enter file name: ", stdout);
+            if(fgets(filename, FILENAME_MAX, stdin) == NULL){
+                fputs("Failed to read input!\n", stderr);
+                continue;
+            }
+            if((ptr = strchr(filename, '\n')) == NULL){
+                fputs("File name too long!\n", stderr);
+                continue;
+            }
+
+            *ptr = '\0';
+
+            if(!strlen(filename)){
+                fputs("Invalid file name!\n", stderr);
+                continue;
+            }
+            if(!stat((const char*)filename, &statbuf)){
+                fputs("File already exists!\n", stderr);
+                continue;
+            }
+            break;
+        }while(1);
+        outname = filename;
+    }
+
+    fd = open(outname, O_WRONLY | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP |
+                                           S_IROTH |
+                                           (exec_bit ? S_IXUSR | S_IXGRP |
+                                                       S_IXOTH : 0));
+    fsync(fd);
+
+    /* Hash and receive the file */
+    sha256_fnc(hash, receive_next, size, NULL);
+
+    for(i=0;i<8;i++){
+        word_t word;
+
+        RECV(client_fd, buffer, 4, 0, 1);
+        UNLOAD_U32(word, buffer);
+
+        if(word != hash[i]){
+            fprintf(stderr, "%s: SHA-256 checksum incorrect!\n"
+                            "SHA-256 checksum: ", name);
+            for(i=0;i<8;i++){
+                fprintf(stderr, "%08lx", hash[i]);
+                LOAD_U32(buffer+i*4, hash[i]);
+            }
+            fputc('\n', stderr);
+
+            close(socket_fd);
+            close(client_fd);
+            close(fd);
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    printf("File `%s' (%lu bytes) received successfully!\n"
+           "SHA-256 checksum: ", outname, size);
+    for(i=0;i<8;i++){
+        printf("%08lx", hash[i]);
+        LOAD_U32(buffer+i*4, hash[i]);
+    }
+    fputc('\n', stdout);
+
+    fsync(fd);
+    close(fd);
+}
+
+void on_sigint(int signum) {
+    (void)signum;
+
+    puts("Closing socket...");
+    close(socket_fd);
+    exit(EXIT_SUCCESS);
+}
+
 
 int main(int argc, char **argv) {
     extern int optind;
@@ -273,7 +521,7 @@ int main(int argc, char **argv) {
         switch(c){
             case 'h':
                 printf(help, *argv);
-                break;
+                return EXIT_SUCCESS;
             case 'p':
                 progress = 1;
                 break;
@@ -313,8 +561,25 @@ int main(int argc, char **argv) {
     }
     port = argv[optind++];
 
-    for(;argv[optind];optind++){
-        if(!receive){
+    if(receive){
+        open_socket(bind, 1);
+
+        if(listen(socket_fd, BACKLOG_MAX)){
+            fprintf(stderr, "%s: listen failed!\n", *argv);
+            return EXIT_FAILURE;
+        }
+
+        signal(SIGINT, on_sigint);
+
+        while(1){
+            client_fd = accept(socket_fd, NULL, NULL);
+
+            receive_file();
+
+            close(client_fd);
+        }
+    }else{
+        for(;argv[optind];optind++){
             printf("Sending `%s'...\n", argv[optind]);
             send_file(argv[optind]);
         }
