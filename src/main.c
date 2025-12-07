@@ -61,8 +61,10 @@
 
 #define BACKLOG_MAX 128
 
+#define PROGRESS_W 40
+
 static const char help[] =
-"USAGE: %s [-hp46] [-s hostname] [port] [files...]\n"
+"USAGE: %s [-hpy46] [-s hostname] port [files...]\n"
 "\n"
 "ft -- A basic file transfer utility.\n"
 "\n"
@@ -90,6 +92,19 @@ static int client_fd;
 
 static char *name;
 
+static size_t bytes;
+static size_t total_bytes;
+
+static void show_progress(size_t v, size_t on, int w) {
+    int n = v*w/on;
+    int i;
+
+    fputs("\033[1K[", stdout);
+    for(i=0;i<n;i++) fputc('=', stdout);
+    for(i=n;i<w;i++) fputc('-', stdout);
+    printf("] %luB/%luB\r", v, on);
+}
+
 static unsigned char file_next(void *_data){
     unsigned char c;
 
@@ -98,6 +113,7 @@ static unsigned char file_next(void *_data){
     /* TODO: Don't read and send the file byte per byte. */
 
     if(read(fd, &c, 1) < 1){
+        if(progress) fputc('\n', stdout);
         fprintf(stderr, "%s: Read error!\n", name);
         close(socket_fd);
         close(fd);
@@ -105,10 +121,17 @@ static unsigned char file_next(void *_data){
     }
 
     if(send(socket_fd, &c, 1, 0) < 1){
+        if(progress) fputc('\n', stdout);
         fprintf(stderr, "%s: Send error!\n", name);
         close(socket_fd);
         close(fd);
         exit(EXIT_FAILURE);
+    }
+
+    /* TODO: Do not show progress on each read. */
+    if(progress){
+        bytes++;
+        show_progress(bytes, total_bytes, PROGRESS_W);
     }
 
     return c;
@@ -277,7 +300,13 @@ static void send_file(char *file) {
     SEND(socket_fd, file, strlen(file)+1, 0);
 
     /* Hash and send the file. */
+    if(progress){
+        total_bytes = size;
+        bytes = 0;
+        show_progress(bytes, total_bytes, PROGRESS_W);
+    }
     sha256_fnc(hash, file_next, size, NULL);
+    if(progress) fputc('\n', stdout);
 
     printf("File `%s' (%lu bytes) sent successfully!\n"
            "SHA-256 checksum: ", file, size);
@@ -318,6 +347,7 @@ static unsigned char receive_next(void *_data){
     /* TODO: Don't receive and write the file byte per byte. */
 
     if(recv(client_fd, &c, 1, 0) < 1){
+        if(progress) fputc('\n', stdout);
         fprintf(stderr, "%s: Receive error!\n", name);
         close(socket_fd);
         close(client_fd);
@@ -326,11 +356,18 @@ static unsigned char receive_next(void *_data){
     }
 
     if(write(fd, &c, 1) < 1){
+        if(progress) fputc('\n', stdout);
         fprintf(stderr, "%s: Write error!\n", name);
         close(socket_fd);
         close(client_fd);
         close(fd);
         exit(EXIT_FAILURE);
+    }
+
+    /* TODO: Do not show progress on each read. */
+    if(progress){
+        bytes++;
+        show_progress(bytes, total_bytes, PROGRESS_W);
     }
 
     return c;
@@ -463,7 +500,13 @@ void receive_file(void) {
     fsync(fd);
 
     /* Hash and receive the file */
+    if(progress){
+        total_bytes = size;
+        bytes = 0;
+        show_progress(bytes, total_bytes, PROGRESS_W);
+    }
     sha256_fnc(hash, receive_next, size, NULL);
+    if(progress) fputc('\n', stdout);
 
     for(i=0;i<8;i++){
         word_t word;
