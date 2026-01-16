@@ -51,6 +51,10 @@
 
 #include <signal.h>
 
+#include <utime.h>
+
+#include <time.h>
+
 #ifdef AF_INET6
 #define DOMAIN (force_ipv6 ? AF_INET6 : (force_ipv4 ? AF_INET : AF_UNSPEC))
 #else
@@ -391,6 +395,8 @@ void receive_file(void) {
 
     int accept = 0;
 
+    struct utimbuf timestamps;
+
     RECV(client_fd, buffer, sizeof(MAGIC), 0, 0);
 
     if(memcmp((unsigned char*)MAGIC, buffer, 4)){
@@ -546,6 +552,15 @@ void receive_file(void) {
 
     fsync(fd);
     close(fd);
+
+    /* XXX: Is the time there in seconds on all systems? */
+    timestamps.actime = atime;
+    timestamps.modtime = mtime;
+
+    if(utime(outname, &timestamps)){
+        fprintf(stderr, "%s: Failed to set timestamps!\n", name);
+        exit(EXIT_FAILURE);
+    }
 }
 
 void on_sigint(int signum) {
