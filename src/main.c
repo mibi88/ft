@@ -67,6 +67,8 @@
 
 #define PROGRESS_W 40
 
+#define BUFFER_MAX 1024
+
 static const char help[] =
 "USAGE: %s [-hpy46] [-s hostname] port [files...]\n"
 "\n"
@@ -99,6 +101,9 @@ static char *name;
 static size_t bytes;
 static size_t total_bytes;
 
+static unsigned char data_buf[BUFFER_MAX];
+static size_t data_buf_size;
+
 static void show_progress(size_t v, size_t on, int w) {
     int n = v*w/on;
     int i;
@@ -107,38 +112,6 @@ static void show_progress(size_t v, size_t on, int w) {
     for(i=0;i<n;i++) fputc('=', stdout);
     for(i=n;i<w;i++) fputc('-', stdout);
     printf("] %luB/%luB\r", v, on);
-}
-
-static unsigned char file_next(void *_data){
-    unsigned char c;
-
-    (void)_data;
-
-    /* TODO: Don't read and send the file byte per byte. */
-
-    if(read(fd, &c, 1) < 1){
-        if(progress) fputc('\n', stdout);
-        fprintf(stderr, "%s: Read error!\n", name);
-        close(socket_fd);
-        close(fd);
-        exit(EXIT_FAILURE);
-    }
-
-    if(send(socket_fd, &c, 1, 0) < 1){
-        if(progress) fputc('\n', stdout);
-        fprintf(stderr, "%s: Send error!\n", name);
-        close(socket_fd);
-        close(fd);
-        exit(EXIT_FAILURE);
-    }
-
-    /* TODO: Do not show progress on each read. */
-    if(progress){
-        bytes++;
-        show_progress(bytes, total_bytes, PROGRESS_W);
-    }
-
-    return c;
 }
 
 typedef int sock_fnc_t(int, const struct sockaddr *, socklen_t);
@@ -245,6 +218,43 @@ static word_t hash[8];
         } \
     }
 
+ssize_t read_size = 0;
+
+static unsigned char send_next(void *_data){
+    (void)_data;
+
+    if(!data_buf_size){
+        read_size = total_bytes-bytes > BUFFER_MAX ?
+                    BUFFER_MAX : total_bytes-bytes;
+
+        if(read(fd, data_buf, read_size) < read_size){
+            if(progress) fputc('\n', stdout);
+            fprintf(stderr, "%s: Read error!\n", name);
+            close(socket_fd);
+            close(fd);
+            exit(EXIT_FAILURE);
+        }
+
+        if(send(socket_fd, data_buf, read_size, 0) < read_size){
+            if(progress) fputc('\n', stdout);
+            fprintf(stderr, "%s: Send error!\n", name);
+            close(socket_fd);
+            close(fd);
+            exit(EXIT_FAILURE);
+        }
+
+        bytes += read_size;
+
+        if(progress){
+            show_progress(bytes, total_bytes, PROGRESS_W);
+        }
+
+        data_buf_size = read_size;
+    }
+
+    return data_buf[read_size-(data_buf_size--)];
+}
+
 static void send_file(char *file) {
     struct stat statbuf;
 
@@ -253,6 +263,8 @@ static void send_file(char *file) {
     size_t i;
 
     unsigned char buffer[4*8+1];
+
+    data_buf_size = 0;
 
     fd = open(file, O_RDONLY);
     if(fd < 0){
@@ -304,12 +316,14 @@ static void send_file(char *file) {
     SEND(socket_fd, file, strlen(file)+1, 0);
 
     /* Hash and send the file. */
+
+    total_bytes = size;
+    bytes = 0;
+
     if(progress){
-        total_bytes = size;
-        bytes = 0;
         show_progress(bytes, total_bytes, PROGRESS_W);
     }
-    sha256_fnc(hash, file_next, size, NULL);
+    sha256_fnc(hash, send_next, size, NULL);
     if(progress) fputc('\n', stdout);
 
     printf("File `%s' (%lu bytes) sent successfully!\n"
@@ -348,8 +362,6 @@ static unsigned char receive_next(void *_data){
 
     (void)_data;
 
-    /* TODO: Don't receive and write the file byte per byte. */
-
     if(recv(client_fd, &c, 1, 0) < 1){
         if(progress) fputc('\n', stdout);
         fprintf(stderr, "%s: Receive error!\n", name);
@@ -368,9 +380,10 @@ static unsigned char receive_next(void *_data){
         exit(EXIT_FAILURE);
     }
 
+    bytes++;
+
     /* TODO: Do not show progress on each read. */
     if(progress){
-        bytes++;
         show_progress(bytes, total_bytes, PROGRESS_W);
     }
 
@@ -396,6 +409,8 @@ void receive_file(void) {
     int accept = 0;
 
     struct utimbuf timestamps;
+
+    data_buf_size = 0;
 
     RECV(client_fd, buffer, sizeof(MAGIC), 0, 0);
 
@@ -512,9 +527,11 @@ void receive_file(void) {
     fsync(fd);
 
     /* Hash and receive the file */
+
+    total_bytes = size;
+    bytes = 0;
+
     if(progress){
-        total_bytes = size;
-        bytes = 0;
         show_progress(bytes, total_bytes, PROGRESS_W);
     }
     sha256_fnc(hash, receive_next, size, NULL);
