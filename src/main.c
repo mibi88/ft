@@ -357,37 +357,47 @@ static char *basename(char *name) {
     return name;
 }
 
+#include <errno.h>
+
 static unsigned char receive_next(void *_data){
-    unsigned char c;
+    ssize_t received;
 
     (void)_data;
 
-    if(recv(client_fd, &c, 1, 0) < 1){
-        if(progress) fputc('\n', stdout);
-        fprintf(stderr, "%s: Receive error!\n", name);
-        close(socket_fd);
-        close(client_fd);
-        close(fd);
-        exit(EXIT_FAILURE);
+    if(!data_buf_size){
+        read_size = total_bytes-bytes > BUFFER_MAX ?
+                    BUFFER_MAX : total_bytes-bytes;
+
+        if((received = recv(client_fd, data_buf, read_size, 0)) < 1){
+            if(progress) fputc('\n', stdout);
+            fprintf(stderr, "%s: Receive error!\n", name);
+            close(socket_fd);
+            close(client_fd);
+            close(fd);
+            exit(EXIT_FAILURE);
+        }
+
+        read_size = received;
+
+        if(write(fd, data_buf, read_size) < read_size){
+            if(progress) fputc('\n', stdout);
+            fprintf(stderr, "%s: Write error!\n", name);
+            close(socket_fd);
+            close(client_fd);
+            close(fd);
+            exit(EXIT_FAILURE);
+        }
+
+        bytes += read_size;
+
+        if(progress){
+            show_progress(bytes, total_bytes, PROGRESS_W);
+        }
+
+        data_buf_size = read_size;
     }
 
-    if(write(fd, &c, 1) < 1){
-        if(progress) fputc('\n', stdout);
-        fprintf(stderr, "%s: Write error!\n", name);
-        close(socket_fd);
-        close(client_fd);
-        close(fd);
-        exit(EXIT_FAILURE);
-    }
-
-    bytes++;
-
-    /* TODO: Do not show progress on each read. */
-    if(progress){
-        show_progress(bytes, total_bytes, PROGRESS_W);
-    }
-
-    return c;
+    return data_buf[read_size-(data_buf_size--)];
 }
 
 void receive_file(void) {
